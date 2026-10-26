@@ -1,6 +1,6 @@
 # Architecture
 
-> **Last reviewed:** 2026-10-10 · ** Last updated:** 2026-10-24 · **Change:** minor (engine building blocks for multi-command actions) · **Target:** Microsoft Excel (Microsoft 365)
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-26 · **Change:** minor (Thai text line layout module in ui-egui) · **Target:** Microsoft Excel (Microsoft 365)
 
 How GridCraft is built today. Rules for contributors are in [`AGENTS.md`](../AGENTS.md).
 
@@ -80,6 +80,7 @@ drawing its own:
   scrolls; one line is Excel's 30 px unless the font's rows need more (`formula_bar::one_line`;
   the Windows UI font's row is 17.28 px), so every counted line fits whatever the font;
   `formula_bar::BarLayout` records where its parts went each frame, for tests.
+- **Thai cell line wrapping** (`thai_layout.rs`): Dictionary-free complex script line breaking for committed worksheet cells with Wrap Text enabled. Uses ICU4X LSTM `LineSegmenter` to find boundary opportunities, performs greedy forward measurement using egui's resolved font galleys, clips oversized initial segments safely, preserves exact UTF-8 byte offsets without mutating the underlying string or inserting ZWSP, enforces cell and per-frame compute budgets with graceful fallback, and caches layout plans across frames in an LRU cache.
 
 
 ## Engine building blocks for multi-command actions
@@ -150,6 +151,7 @@ rpm, tarball), FreeBSD, and web (WASM; WebGPU or WebGL2). Release workflows in
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-26 | minor | Thai cell line wrapping module (`thai_layout.rs`) in ui-egui |
 | 2026-10-24 | minor | Engine building blocks for multi-command actions: undo groups, recording buffer, document trust, chunked hidden-name storage |
 | 2026-10-14 | minor | Document Undo's retained-cell-storage budget and latest-step guarantee |
 | 2026-10-10 | major | Created from the code on main: crates, layers, data flow, agent control, known gaps |

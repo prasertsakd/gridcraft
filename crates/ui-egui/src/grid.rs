@@ -891,6 +891,7 @@ fn paint_panes(
     cf: &mut CfCache,
     t: &Tokens,
 ) -> Vec<((u32, u32), (u32, u32), Rect)> {
+    crate::thai_layout::begin_frame_budget();
     // Quadrants: (rows, cols, clip).
     let (sr0, sr1) = geo.scroll_rows(sh);
     let (sc0, sc1) = geo.scroll_cols(sh);
@@ -1311,6 +1312,13 @@ pub(crate) fn paint_quadrant(
         // Rotated text wraps along its own direction (below), not across the column width.
         if !rotated && (st.align.wrap || st.align.h == HAlign::Justify) {
             let wrap_w = (rect.width() - 2.0 * pad - indent).max(4.0);
+            if crate::thai_layout::is_eligible(&text, st, &v, numeric).is_ok()
+                && let crate::thai_layout::ThaiLayoutResult::Ready(thai_cell) =
+                    crate::thai_layout::layout_cell(p, &text, &font, color, wrap_w, halign, z)
+            {
+                crate::thai_layout::paint_thai_cell(p, &thai_cell, *rect, text_left, halign, st.align.v, pad, indent, z, color);
+                continue;
+            }
             let mut job = egui::text::LayoutJob::simple(text.clone(), font.clone(), color, wrap_w);
             job.halign = match halign {
                 HAlign::Center | HAlign::CenterAcross => egui::Align::Center,
