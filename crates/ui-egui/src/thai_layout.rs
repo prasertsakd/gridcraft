@@ -1083,19 +1083,21 @@ pub fn layout_cell(p: &Painter, text: &str, font: &FontId, color: Color32, avail
     ThaiLayoutResult::Ready(ThaiCellLayout { lines, size: total_size })
 }
 
-/// Paints the ready Thai cell layout inside `rect` respecting alignment, padding, and clipping.
-pub fn paint_thai_cell(
-    p: &Painter,
-    layout: &ThaiCellLayout,
-    rect: Rect,
-    text_left: f32,
-    halign: HAlign,
-    valign: VAlign,
-    pad: f32,
-    indent: f32,
-    z: f32,
-    color: Color32,
-) {
+/// Cell geometry and appearance used to paint an already measured Thai layout.
+pub struct ThaiCellPaint {
+    pub rect: Rect,
+    pub text_left: f32,
+    pub halign: HAlign,
+    pub valign: VAlign,
+    pub pad: f32,
+    pub indent: f32,
+    pub z: f32,
+    pub color: Color32,
+}
+
+/// Paints the ready Thai cell layout respecting alignment, padding, and clipping.
+pub fn paint_thai_cell(p: &Painter, layout: &ThaiCellLayout, paint: ThaiCellPaint) {
+    let ThaiCellPaint { rect, text_left, halign, valign, pad, indent, z, color } = paint;
     if layout.lines.is_empty() {
         return;
     }

@@ -1,6 +1,6 @@
 # Architecture
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-26 · **Change:** minor (Thai text line layout module in ui-egui) · **Target:** Microsoft Excel (Microsoft 365)
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-30 · **Change:** minor (Thai layout integrated with extracted grid cell/pane functions; macro architecture retained) · **Target:** Microsoft Excel (Microsoft 365)
 
 How GridCraft is built today. Rules for contributors are in [`AGENTS.md`](../AGENTS.md).
 
@@ -99,12 +99,15 @@ Actions made of many commands (macros, a debugger that runs one step per call) u
   every group it opened, as `group_rollback` does. `Session::abort_groups(doc)`, and the command
   `automate.stopAction` on the active workbook, roll back the groups left open on a document (a
   debugger the person abandons, a caller that dropped its token), so Undo works there again. The
+  command runs on its own: a step of a script or macro may not stop the action it is part of, and
+  a recording leaves it out, so playing the recording back never stops the run. The
   history limit is applied when the outermost command finishes; until then the steps made inside
   it are bounded on their own.
 - **Recording buffer** (`record.rs`). `Session::start_recording` collects each successful
   top-level command with the document, sheet and selection it ran in, without secret parameters.
   Commands run by other commands are not recorded, nor is a menu-style call that only opened a
-  dialog (the dialog's confirming call is the step), and the buffer is independent of the journal
+  dialog (the dialog's confirming call is the step; a run that changed the workbook before a step
+  of it opened a dialog is recorded), and the buffer is independent of the journal
   (Automate › Record Actions still records through the journal).
 - **Document trust.** `DocState::trust` is `Local` for workbooks made in the session and
   `FromFile` for workbooks opened from a file. `Trust` has no default: `DocState::new` takes it,
@@ -121,10 +124,16 @@ Actions made of many commands (macros, a debugger that runs one step per call) u
   other than tab, line feed and carriage return, U+FFFE, U+FFFF) are stored as the noncharacter
   U+FDD0 and four hex digits, as is U+FDD0 itself, and read back as they were. `stash::items`
   and `stash::keys` list the items under a key prefix in one pass over the names, at most
-  10,000 of them (`stash::MAX_ITEMS`). The older single-name `_sc_<key>` items are read as well.
+  10,000 of them (`stash::MAX_ITEMS`) with a count of the rest, so a caller can say what it did
+  not list. The older single-name `_sc_<key>` items are read as well.
   `formulas.defineName` and `formulas.deleteName` refuse a name the workbook holds such an item
   under (a hidden workbook-scope name of either shape; a visible one is the person's own), and
   `formulas.createFromSelection` skips such labels, unless `force: true` is passed.
+
+The macro engine (`engine/src/macros/`, commands in `cmd/macros.rs`, described in
+[`macros.md`](macros.md)) is built on these: a run is an undo group, the recorder reads the
+recording buffer, the policy asks before a macro in a `FromFile` workbook runs, and xlsx keeps
+macros as chunked hidden names (`_gc_macro_<n>_<k>`: macro `n`, chunk `k`).
 
 ## Agent control
 
@@ -151,7 +160,10 @@ rpm, tarball), FreeBSD, and web (WASM; WebGPU or WebGL2). Release workflows in
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-30 | minor | Preserve Thai eligibility, geometry and shared pass budgets in upstream extracted cell/pane functions |
 | 2026-10-26 | minor | Thai cell wrapping: font-generation and DPI cache identity, bounded payload accounting, and explicit T1 scope (AutoFit/editor remain separate) |
+| 2026-10-25 | trivial | The hidden names that hold macros are `_gc_macro_<n>_<k>` |
+| 2026-10-24 | minor | Macro engine on the building blocks (`macros/`, `cmd/macros.rs`) |
 | 2026-10-24 | minor | Engine building blocks for multi-command actions: undo groups, recording buffer, document trust, chunked hidden-name storage |
 | 2026-10-14 | minor | Document Undo's retained-cell-storage budget and latest-step guarantee |
 | 2026-10-10 | major | Created from the code on main: crates, layers, data flow, agent control, known gaps |

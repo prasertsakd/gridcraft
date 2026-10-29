@@ -1,6 +1,6 @@
 # Gaps
 
-> **Last reviewed:** 2026-10-11 · **Last updated:** 2026-10-28 · **Change:** minor (§5: Thai line wrapping for committed cells landed) · **Target:** Microsoft Excel (Microsoft 365)
+> **Last reviewed:** 2026-10-11 · **Last updated:** 2026-10-30 · **Change:** minor (§5: Thai wrapping integration and benchmark provenance) · **Target:** Microsoft Excel (Microsoft 365)
 
 Every known shortfall against Excel, one entry each, ranked by user impact (what blocks someone
 using GridCraft for real work first). This is the work list: pick from the top, check the open
@@ -57,7 +57,7 @@ No alpha blockers: every core workflow passes the [alpha gate](roadmap.md#alpha-
 - **Evidence:** system-font fallback for CJK, Thai and Hebrew landed in #38 (closed #32); Thai line wrapping for committed worksheet cells landed in `crates/ui-egui/src/thai_layout.rs` using ICU4X LSTM segmentation with greedy measurement, exact UTF-8 byte ranges, and LRU caching (AutoFit row height measurement remains separate); #142
   (Chinese text) awaits confirmation; #54 (symbols as boxes on Fedora); no shaping for Arabic or
   Devanagari; PDF writer uses 14 standard fonts only.
-- **Performance:** the 500-visible-cell Windows release benchmark at 100% / 1x measured warm p50/p95 4.0449/5.1826 ms for the Thai candidate versus 2.4476/2.8611 ms on pinned upstream. Candidate was slower in all six tested configurations; fixed run order and host noise limit the comparison. Instrumented cold candidate required four renderer passes versus one baseline pass.
+- **Performance:** the 2026-10-27 snapshot's 500-visible-cell Windows release benchmark at 100% / 1x measured warm p50/p95 4.0449/5.1826 ms for the Thai candidate versus 2.4476/2.8611 ms on pinned upstream `63038650`. Candidate was slower in all six tested configurations; fixed run order and host noise limit the comparison. Instrumented cold candidate required four renderer passes versus one baseline pass. These results predate the later grid integration; no newer performance measurement is claimed.
 - **Impact:** blocks most of the world's users even with an English UI.
 - **Estimate:** 12–20 h. [localization-parity.md](localization-parity.md)
 
@@ -184,6 +184,7 @@ No alpha blockers: every core workflow passes the [alpha gate](roadmap.md#alpha-
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-30 | minor | Distinguish the Thai benchmark snapshot from the later upstream grid integration; no parity score change |
 | 2026-10-28 | minor | Record post-integration Thai benchmark regression and scope; no parity score change |
 | 2026-10-26 | minor | §5: Thai line wrapping for committed cells landed (ICU4X LSTM segmenter, greedy measurement, LRU cache) |
 | 2026-10-24 | minor | §8: PivotTable Enable show details: `pivot.options` `enableShowDetails` turns Show Details off for a PivotTable, read and written in XLSX as `enableDrill` |

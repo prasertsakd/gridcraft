@@ -1,6 +1,6 @@
 # Localization parity
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-28 · **Change:** minor (Thai word wrapping for committed cells) · **Target:** Microsoft Excel (Microsoft 365), Excel for Mac 16.113.4
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-30 · **Change:** minor (Thai wrapping preserved through the grid refactor; benchmark source clarified) · **Target:** Microsoft Excel (Microsoft 365), Excel for Mac 16.113.4
 
 Per-language status against Excel, which ships its UI in dozens of languages (Windows language
 packs cover 100+), with localized function names, argument separators, number and date formats,
@@ -44,11 +44,12 @@ right-to-left sheets and full complex-script support. Part of
 - **Script support.** System-font fallback for CJK, Thai and Hebrew landed in #38 (closes #32).
   Committed Thai cells with Wrap Text use ICU4X LSTM line breaks in `crates/ui-egui/src/thai_layout.rs`;
   row AutoFit and editing are not part of this support. A 500-visible-cell Windows release benchmark
-  against pinned upstream measured warm p50/p95 4.0449/5.1826 ms here versus 2.4476/2.8611 ms
+  of the 2026-10-27 snapshot against upstream `63038650` measured warm p50/p95 4.0449/5.1826 ms versus 2.4476/2.8611 ms
   on baseline at 100% / 1x; candidate was slower in all six tested zoom/DPI pairs. Cold
   instrumented candidate needed four renderer passes versus one baseline pass. Fixed run order,
   instrumentation and host noise limit interpretation; this is not a performance-target pass.
-  The feature-off settled flag does not establish adapter settlement. #142 (Chinese text) is still
+  The feature-off settled flag does not establish adapter settlement. These measurements predate
+  the later upstream grid integration; no newer performance result is claimed. #142 (Chinese text) is still
   open pending confirmation. Native CJK fallback also probes Flatpak's read-only
   `/run/host/fonts`, `/run/host/local-fonts` and `/run/host/user-fonts` layouts, so installed
   Noto CJK and WenQuanYi faces can render Chinese without a broad filesystem grant. This does
@@ -117,6 +118,7 @@ language (none so far) and of localized function names.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-30 | minor | Preserve Thai wrapping through current grid extraction and distinguish the earlier measured snapshot; no parity score change |
 | 2026-10-28 | minor | Record post-integration Thai benchmark regression and scope; no parity score change |
 | 2026-10-23 | minor | Missing translations are reported, never a failure: `cargo xtask i18n-report` prints, per language, the strings other catalogs translate and it lacks (plus Spanish function help rows keyed by English the function catalog no longer has) and always passes; `cargo xtask ci` runs it first. Coverage and per-language parity tests and tests of one language's exact wording are gone; UI tests take the expected text from the catalog. Duplicate-key, placeholder, context-prefix and line-shape checks stay |
 | 2026-10-21 | minor | Romanian interface (`ro`, Română): 970 labels covering every key of the other catalogs (`crates/ui-egui/src/i18n/ro.rs`), `ro-*` system locales, the View-tab switcher and `app.language.set`; context keys show no prefix (File › Options test). English formulas and formats; AI-assisted draft pending native-speaker review |

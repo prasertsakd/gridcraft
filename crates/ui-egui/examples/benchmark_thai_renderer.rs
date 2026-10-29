@@ -23,6 +23,10 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 type Harness = egui_kittest::Harness<'static, SheetApp>;
+type FirstLineGalleys = BTreeMap<u32, Arc<egui::Galley>>;
+type GeometryCoverage = (Vec<u32>, String, usize, FirstLineGalleys, [f32; 4], [f32; 4], [f32; 4], String);
+type PassEvidence = (PassRecord, FirstLineGalleys);
+type WarmSamples = (Vec<PassRecord>, Vec<SampleRecord>, bool);
 
 #[allow(clippy::disallowed_methods)] // Native-only benchmark example; the wasm build does not execute it.
 fn benchmark_clock_now() -> Instant {
@@ -352,7 +356,9 @@ fn text_for(seed: u64, id: usize, scalar_target: usize) -> String {
     chars.into_iter().collect()
 }
 
-fn make_workload(name: &str, seed: u64, count: usize, rows: usize, columns: usize, target_scalars: usize, width_px: f64, height_px: f64) -> Workload {
+fn make_workload(name: &str, seed: u64, count: usize, shape: [usize; 2], target_scalars: usize, cell_size: [f64; 2]) -> Workload {
+    let [rows, columns] = shape;
+    let [width_px, height_px] = cell_size;
     let horizontal = ["General", "Left", "Center", "Right"];
     let vertical = ["Top", "Center", "Bottom"];
     let mut cells = Vec::with_capacity(count);
@@ -506,10 +512,7 @@ fn build_harness(app: SheetApp, config: Config, workload: &Workload, fonts: Font
     (harness, draw_grid)
 }
 
-fn verify_geometry_and_coverage(
-    harness: &Harness,
-    workload: &Workload,
-) -> Result<(Vec<u32>, String, usize, BTreeMap<u32, Arc<egui::Galley>>, [f32; 4], [f32; 4], [f32; 4], String), Box<dyn Error>> {
+fn verify_geometry_and_coverage(harness: &Harness, workload: &Workload) -> Result<GeometryCoverage, Box<dyn Error>> {
     let app = harness.state();
     let document = app.session.active().ok_or_else(|| io::Error::other("benchmark workbook missing after production renderer pass"))?;
     let sheet = document.wb.active().ok_or_else(|| io::Error::other("benchmark sheet missing after production renderer pass"))?;
@@ -615,7 +618,7 @@ fn run_pass(
     workload: &Workload,
     timed: bool,
     previous: Option<&BTreeMap<u32, Arc<egui::Galley>>>,
-) -> Result<(PassRecord, BTreeMap<u32, Arc<egui::Galley>>), Box<dyn Error>> {
+) -> Result<PassEvidence, Box<dyn Error>> {
     let start = benchmark_clock_now();
     harness.step();
     let elapsed_ns = timed.then(|| start.elapsed().as_nanos());
@@ -723,7 +726,7 @@ fn run_warm_samples(
     fonts: FontDefinitions,
     sample_count: usize,
     adapter_expected: bool,
-) -> Result<(Vec<PassRecord>, Vec<SampleRecord>, bool), Box<dyn Error>> {
+) -> Result<WarmSamples, Box<dyn Error>> {
     app.session.text_width = None;
     let (mut harness, draw_grid) = build_harness(app, config, workload, fonts);
     if !harness.state().fonts_ready {
@@ -921,7 +924,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     }
     let font_len = bytes.len();
     let fonts = fonts_with_required_thai_face(bytes);
-    let main = make_workload("main", MAIN_SEED, MAIN_CELL_COUNT, MAIN_ROWS, MAIN_COLUMNS, 80, 160.0, 150.0);
+    let main = make_workload("main", MAIN_SEED, MAIN_CELL_COUNT, [MAIN_ROWS, MAIN_COLUMNS], 80, [160.0, 150.0]);
     if main.description.unique_texts != MAIN_CELL_COUNT
         || main.description.average_unicode_scalars != 80.0
         || main.description.thai_cells != MAIN_CELL_COUNT
@@ -932,7 +935,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut workloads =
         vec![benchmark_workload(main, &options.configs, options.cold_samples, options.warm_samples, &fonts, options.thai_adapter_expected)?];
     if options.run_stress {
-        let stress = make_workload("stress-long-text-narrow-columns", STRESS_SEED, 5, 5, 1, 8_000, 42.0, 60.0);
+        let stress = make_workload("stress-long-text-narrow-columns", STRESS_SEED, 5, [5, 1], 8_000, [42.0, 60.0]);
         workloads.push(benchmark_workload(stress, &[Config { zoom_pct: 100, dpi: 1 }], 3, 10, &fonts, options.thai_adapter_expected)?);
     }
     let generated_at_unix_ms = generated_at_unix_ms()?;
