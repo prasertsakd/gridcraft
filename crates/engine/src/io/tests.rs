@@ -18,7 +18,7 @@ fn copied(wb: &Workbook, range: &str) -> String {
     range_html(wb, 0, r, &crate::display::range_text(wb, 0, r)).unwrap()
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), unix))]
 #[test]
 fn save_fails_upfront_when_the_temp_name_is_taken() {
     // Another local user who can write the directory must not be able to point the
@@ -29,10 +29,29 @@ fn save_fails_upfront_when_the_temp_name_is_taken() {
     let victim = dir.join("victim.txt");
     std::fs::write(&victim, b"original").unwrap();
     let dest = dir.join("book.xlsx");
-    std::os::unix::fs::symlink(&victim, dir.join("book.xlsx.sctmp")).unwrap();
+    let temp = dir.join("book.xlsx.sctmp");
+    std::os::unix::fs::symlink(&victim, &temp).unwrap();
     let err = write_file(dest.to_str().unwrap(), b"new").unwrap_err();
     assert_eq!(std::fs::read(&victim).unwrap(), b"original");
+    assert!(std::fs::symlink_metadata(&temp).unwrap().file_type().is_symlink());
     assert!(!dir.join("book.xlsx").exists(), "{err}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn save_fails_upfront_when_an_existing_temp_file_is_taken() {
+    // The temporary path is reserved exclusively on every native platform: a pre-existing
+    // regular file must not be overwritten, and the final destination must not be created.
+    let dir = std::env::temp_dir().join(format!("gridcraft-fs-safety-temp-file-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let temp = dir.join("book.xlsx.sctmp");
+    std::fs::write(&temp, b"original").unwrap();
+    let dest = dir.join("book.xlsx");
+    let err = write_file(dest.to_str().unwrap(), b"new").unwrap_err();
+    assert_eq!(std::fs::read(&temp).unwrap(), b"original");
+    assert!(!dest.exists(), "{err}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
