@@ -80,7 +80,7 @@ drawing its own:
   scrolls; one line is Excel's 30 px unless the font's rows need more (`formula_bar::one_line`;
   the Windows UI font's row is 17.28 px), so every counted line fits whatever the font;
   `formula_bar::BarLayout` records where its parts went each frame, for tests.
-- **Thai cell line wrapping** (`thai_layout.rs`): ICU4X LSTM `LineSegmenter` supplies break opportunities for committed worksheet cells with Wrap Text enabled. The renderer measures candidate substrings with egui's active font, clips oversized first segments, preserves exact UTF-8 byte ranges without changing workbook text, and falls back when cell or frame work budgets are exhausted. Its LRU cache is capped at 1,024 plans and 8 MiB of accounted payload (HashMap table overhead is excluded), keyed by text, font family/size/generation, width, zoom, alignment and pixels-per-point; installing fonts invalidates prior plans. T1 row heights are explicit, so Thai AutoFit and in-cell editor wrapping remain separate work.
+- **Thai cell line wrapping** (`thai_layout.rs`): ICU4X LSTM `LineSegmenter` supplies break opportunities for committed worksheet cells with Wrap Text enabled. The renderer measures candidate substrings with egui's active font, clips oversized first segments, preserves exact UTF-8 byte ranges without changing workbook text, and falls back when cell or frame work budgets are exhausted. Its global plan LRU is capped at 1,024 entries and an 8 MiB estimate of retained allocations, including HashMap table capacity, keys/strings and line vectors; this estimate is not process RSS. Keys include Context identity, font family/size/generation, width, zoom, alignment and pixels-per-point. Installing fonts invalidates only that Context's plans, and final galleys reuse egui's per-Context layout cache. T1 row heights are explicit, so Thai AutoFit and in-cell editor wrapping remain separate work.
 
 
 ## Engine building blocks for multi-command actions
@@ -160,7 +160,7 @@ rpm, tarball), FreeBSD, and web (WASM; WebGPU or WebGL2). Release workflows in
 
 | Date | Change | Summary |
 |---|---|---|
-| 2026-10-30 | minor | Preserve Thai eligibility, geometry and shared pass budgets in upstream extracted cell/pane functions |
+| 2026-10-30 | minor | Preserve Thai eligibility, geometry and shared pass budgets in upstream extracted cell/pane functions; describe retained table allocation accounting |
 | 2026-10-26 | minor | Thai cell wrapping: font-generation and DPI cache identity, bounded payload accounting, and explicit T1 scope (AutoFit/editor remain separate) |
 | 2026-10-25 | trivial | The hidden names that hold macros are `_gc_macro_<n>_<k>` |
 | 2026-10-24 | minor | Macro engine on the building blocks (`macros/`, `cmd/macros.rs`) |
