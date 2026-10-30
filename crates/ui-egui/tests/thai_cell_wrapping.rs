@@ -12,13 +12,17 @@ use gridcraft_engine::Session;
 use gridcraft_engine::core::{CellRef, Value};
 use gridcraft_ui_egui::{SheetApp, grid::Geo, thai_layout, theme};
 use serde_json::json;
-use std::{path::Path, sync::Mutex};
+use std::{
+    path::{Path, PathBuf},
+    sync::{Mutex, OnceLock},
+};
 
 #[path = "common/thai_font.rs"]
 mod thai_font;
 
 type Harness = egui_kittest::Harness<'static, SheetApp>;
 static SNAPSHOT_RENDER_LOCK: Mutex<()> = Mutex::new(());
+static SNAPSHOT_DIRECTORY: OnceLock<PathBuf> = OnceLock::new();
 
 fn harness_with_session_config(session: Session, zoom: Option<u16>, pixels_per_point: f32, steps: usize) -> Harness {
     let mut session = session;
@@ -96,8 +100,15 @@ fn assert_near(actual: f32, expected: f32, context: &str) {
 fn save_task3_snapshot(h: &mut Harness, filename: &str) {
     let _snapshot_guard = SNAPSHOT_RENDER_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let image = h.render().expect("render TASK 3 geometry snapshot");
-    let snapshot_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plan");
-    std::fs::create_dir_all(&snapshot_dir).unwrap();
+    let snapshot_dir = SNAPSHOT_DIRECTORY.get_or_init(|| {
+        let parent = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plan");
+        std::fs::create_dir_all(&parent).unwrap();
+        // Keep diagnostic artifacts for inspection, with exclusive random isolation
+        // across test processes (including processes that happen to share a PID).
+        let directory = tempfile::Builder::new().prefix("thai-rendering-").tempdir_in(parent).unwrap().keep();
+        eprintln!("Thai rendering snapshots: {}", directory.display());
+        directory
+    });
     image.save(snapshot_dir.join(filename)).unwrap();
 }
 

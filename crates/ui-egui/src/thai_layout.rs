@@ -7,6 +7,7 @@
 //! Follows the strict repository safety policy: `#![deny(clippy::unwrap_used)]`, no panics,
 //! checked arithmetic, finite geometry validation, bounded budgets, and memory-capped LRU cache.
 
+use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -76,6 +77,7 @@ struct RetryProgress {
     passes: usize,
     no_progress_passes: usize,
     previous_cache_hits: usize,
+    stopped: bool,
 }
 
 impl FrameBudget {
@@ -104,13 +106,10 @@ struct FrameBudgetState {
     workload_items: usize,
     cache_hits: usize,
     exhausted: bool,
+    suspend_misses: bool,
     retry_progress: RetryProgress,
     finish_baseline: Option<RetryProgress>,
     repaint_retry: bool,
-    #[cfg(feature = "thai-benchmark-diagnostics")]
-    transient_fallbacks: usize,
-    #[cfg(feature = "thai-benchmark-diagnostics")]
-    permanent_fallbacks: usize,
 }
 
 impl FrameBudgetState {
@@ -123,13 +122,10 @@ impl FrameBudgetState {
             workload_items: 0,
             cache_hits: 0,
             exhausted: false,
+            suspend_misses: false,
             retry_progress: RetryProgress::default(),
             finish_baseline: None,
             repaint_retry: false,
-            #[cfg(feature = "thai-benchmark-diagnostics")]
-            transient_fallbacks: 0,
-            #[cfg(feature = "thai-benchmark-diagnostics")]
-            permanent_fallbacks: 0,
         }
     }
 
@@ -140,19 +136,13 @@ impl FrameBudgetState {
         self.workload_items = 0;
         self.cache_hits = 0;
         self.exhausted = false;
+        self.suspend_misses = self.retry_progress.stopped;
         self.finish_baseline = None;
         self.repaint_retry = false;
-        #[cfg(feature = "thai-benchmark-diagnostics")]
-        {
-            self.transient_fallbacks = 0;
-            self.permanent_fallbacks = 0;
-        }
     }
 
-    fn record_request(&mut self, key: &CacheKey, cache_hit: bool) {
-        let mut hasher = DefaultHasher::new();
-        key.hash(&mut hasher);
-        self.workload_hash = self.workload_hash.rotate_left(7) ^ hasher.finish().wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    fn record_request(&mut self, key_hash: u64, cache_hit: bool) {
+        self.workload_hash = self.workload_hash.rotate_left(7) ^ key_hash.wrapping_mul(0x9e37_79b9_7f4a_7c15);
         self.workload_items = self.workload_items.saturating_add(1);
         if cache_hit {
             self.cache_hits = self.cache_hits.saturating_add(1);
@@ -171,6 +161,13 @@ impl FrameBudgetState {
             return false;
         }
 
+        // Keep the stopped decision even if the stable, no-eviction pass has more hits.
+        // A different complete request sequence restarts evaluation on the next pass.
+        if baseline.stopped && baseline.signature == Some(signature) {
+            self.retry_progress = baseline;
+            self.repaint_retry = false;
+            return false;
+        }
         let mut progress = baseline;
         if progress.signature == Some(signature) {
             if self.cache_hits > progress.previous_cache_hits {
@@ -185,8 +182,9 @@ impl FrameBudgetState {
             progress.no_progress_passes = 0;
         }
         progress.previous_cache_hits = self.cache_hits;
+        progress.stopped = progress.no_progress_passes >= MAX_NO_PROGRESS_PASSES || progress.passes >= MAX_RETRY_PASSES;
         self.retry_progress = progress;
-        self.repaint_retry = progress.no_progress_passes < MAX_NO_PROGRESS_PASSES && progress.passes < MAX_RETRY_PASSES;
+        self.repaint_retry = !progress.stopped;
         self.repaint_retry
     }
 }
@@ -205,19 +203,6 @@ fn context_cache_identity_id() -> egui::Id {
 
 fn new_context_cache_identity() -> ContextCacheIdentity {
     ContextCacheIdentity { context_id: NEXT_CONTEXT_ID.fetch_add(1, Ordering::Relaxed).max(1), font_generation: 1 }
-}
-
-fn context_cache_identity(ctx: &egui::Context) -> ContextCacheIdentity {
-    let id = context_cache_identity_id();
-    ctx.data_mut(|data| {
-        if let Some(identity) = data.get_temp::<ContextCacheIdentity>(id) {
-            identity
-        } else {
-            let identity = new_context_cache_identity();
-            data.insert_temp(id, identity);
-            identity
-        }
-    })
 }
 
 /// Records a new font generation for this egui context and drops plans from older font sets.
@@ -271,13 +256,11 @@ pub(crate) fn install_frame_budget_finalizer(ctx: &egui::Context) {
 fn with_frame_budget<R>(ctx: &egui::Context, update: impl FnOnce(&mut FrameBudgetState) -> R) -> R {
     let (id, pass_nr) = frame_budget_key(ctx);
     ctx.data_mut(|data| {
-        let mut state = if let Some(state) = data.get_temp::<FrameBudgetState>(id) { state } else { FrameBudgetState::new(pass_nr) };
+        let state = data.get_temp_mut_or_insert_with(id, || FrameBudgetState::new(pass_nr));
         if state.pass_nr != pass_nr {
             state.start_pass(pass_nr);
         }
-        let result = update(&mut state);
-        data.insert_temp(id, state);
-        result
+        update(state)
     })
 }
 
@@ -305,91 +288,6 @@ pub fn frame_budget_usage(ctx: &egui::Context) -> FrameBudgetUsage {
             measured_bytes: state.usage.measured_bytes,
         })
     })
-}
-
-/// Counters from actual Thai adapter requests in one renderer pass.
-/// Available only in an opt-in benchmark build.
-#[cfg(feature = "thai-benchmark-diagnostics")]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
-pub struct BenchmarkPassUsage {
-    pub requests: usize,
-    pub cache_hits: usize,
-    pub cache_misses: usize,
-    pub segmentations: usize,
-    pub measurements: usize,
-    pub measured_bytes: usize,
-    pub transient_fallbacks: usize,
-    pub permanent_fallbacks: usize,
-    pub exhausted: bool,
-    pub repaint_retry: bool,
-    pub retry_passes: usize,
-    pub no_progress_passes: usize,
-}
-
-/// Benchmark-only snapshot of measured pass counters and cache accounting.
-#[cfg(feature = "thai-benchmark-diagnostics")]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
-pub struct BenchmarkDiagnostics {
-    pub pass: BenchmarkPassUsage,
-    pub context_cache_entries: usize,
-    pub context_cache_accounted_bytes: usize,
-    pub global_cache_entries: usize,
-    pub global_cache_accounted_bytes: usize,
-}
-
-/// Reads benchmark-only counters after the production grid renderer has run.
-#[cfg(feature = "thai-benchmark-diagnostics")]
-pub fn benchmark_diagnostics(ctx: &egui::Context) -> BenchmarkDiagnostics {
-    let (id, _) = frame_budget_key(ctx);
-    let pass = ctx.data(|data| {
-        data.get_temp::<FrameBudgetState>(id).map_or_else(BenchmarkPassUsage::default, |state| BenchmarkPassUsage {
-            requests: state.workload_items,
-            cache_hits: state.cache_hits,
-            cache_misses: state.workload_items.saturating_sub(state.cache_hits),
-            segmentations: state.usage.segmentations,
-            measurements: state.usage.measurements,
-            measured_bytes: state.usage.measured_bytes,
-            transient_fallbacks: state.transient_fallbacks,
-            permanent_fallbacks: state.permanent_fallbacks,
-            exhausted: state.exhausted,
-            repaint_retry: state.repaint_retry,
-            retry_passes: state.retry_progress.passes,
-            no_progress_passes: state.retry_progress.no_progress_passes,
-        })
-    });
-    let identity = context_cache_identity(ctx);
-    let (context_cache_entries, context_cache_accounted_bytes) =
-        CACHE.lock().map_or((0, 0), |guard| guard.as_ref().map_or((0, 0), |cache| cache.context_usage(identity.context_id)));
-    let global = cache_usage();
-    BenchmarkDiagnostics {
-        pass,
-        context_cache_entries,
-        context_cache_accounted_bytes,
-        global_cache_entries: global.entries,
-        global_cache_accounted_bytes: global.payload_bytes,
-    }
-}
-
-/// Clears only plans owned by `ctx`, preserving cache entries from other Contexts.
-#[cfg(feature = "thai-benchmark-diagnostics")]
-pub fn clear_context_cache_for_benchmark(ctx: &egui::Context) {
-    let identity = context_cache_identity(ctx);
-    if let Ok(mut guard) = CACHE.lock()
-        && let Some(cache) = guard.as_mut()
-    {
-        cache.clear_context(identity.context_id);
-    }
-}
-
-#[cfg(feature = "thai-benchmark-diagnostics")]
-fn record_benchmark_fallback(ctx: &egui::Context, reason: FallbackReason) {
-    with_frame_budget(ctx, |state| {
-        if reason == FallbackReason::FrameBudgetExhausted {
-            state.transient_fallbacks = state.transient_fallbacks.saturating_add(1);
-        } else {
-            state.permanent_fallbacks = state.permanent_fallbacks.saturating_add(1);
-        }
-    });
 }
 
 /// Approximate resident memory retained by the bounded Thai line-plan cache.
@@ -424,13 +322,9 @@ fn mark_frame_budget_exhausted(ctx: &egui::Context) {
     with_frame_budget(ctx, |state| state.exhausted = true);
 }
 
-fn frame_budget_is_exhausted(ctx: &egui::Context) -> bool {
-    let (id, pass_nr) = frame_budget_key(ctx);
-    ctx.data(|data| data.get_temp::<FrameBudgetState>(id).is_some_and(|state| state.pass_nr == pass_nr && state.exhausted))
-}
-
+#[cfg(test)]
 fn record_layout_request(ctx: &egui::Context, key: &CacheKey, cache_hit: bool) {
-    with_frame_budget(ctx, |state| state.record_request(key, cache_hit));
+    with_frame_budget(ctx, |state| state.record_request(key.view().request_hash(), cache_hit));
 }
 
 /// Finalize the complete Context/viewport pass after all registered egui paint scopes have run.
@@ -605,6 +499,12 @@ fn get_break_opportunities_with(para_text: &str, mut record: impl FnMut()) -> Ve
     breaks
 }
 
+enum CacheRequest {
+    Cached(CachedPlan),
+    Measure(Arc<CacheKey>),
+    Deferred,
+}
+
 /// Cached representation of laid out line boundaries.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct CachedPlanLine {
@@ -613,7 +513,8 @@ struct CachedPlanLine {
 
 #[derive(Clone, Debug)]
 struct CachedPlan {
-    lines: Vec<CachedPlanLine>,
+    lines: Arc<[CachedPlanLine]>,
+    key_hash: u64,
     fallback_reason: Option<FallbackReason>,
     accounted_bytes: usize,
     last_used: u64,
@@ -630,6 +531,89 @@ struct CacheKey {
     font_gen: u64,
     zoom_pct: u16,
     halign: u8,
+}
+
+// Owned and borrowed keys use exactly the same fields and hashing order. The local
+// trait permits HashMap's borrowed lookup through Arc without copying text or family.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct CacheKeyRef<'a> {
+    text: &'a str,
+    family_name: &'a str,
+    context_id: u64,
+    font_size_bits: u32,
+    avail_width_bits: u32,
+    pixels_per_point_bits: u32,
+    font_gen: u64,
+    zoom_pct: u16,
+    halign: u8,
+}
+
+trait CacheKeyData {
+    fn view(&self) -> CacheKeyRef<'_>;
+}
+
+impl CacheKeyData for CacheKey {
+    fn view(&self) -> CacheKeyRef<'_> {
+        CacheKeyRef {
+            text: &self.text,
+            family_name: &self.family_name,
+            context_id: self.context_id,
+            font_size_bits: self.font_size_bits,
+            avail_width_bits: self.avail_width_bits,
+            pixels_per_point_bits: self.pixels_per_point_bits,
+            font_gen: self.font_gen,
+            zoom_pct: self.zoom_pct,
+            halign: self.halign,
+        }
+    }
+}
+
+impl CacheKeyRef<'_> {
+    fn into_owned(self) -> CacheKey {
+        CacheKey {
+            text: self.text.to_owned(),
+            family_name: self.family_name.to_owned(),
+            context_id: self.context_id,
+            font_size_bits: self.font_size_bits,
+            avail_width_bits: self.avail_width_bits,
+            pixels_per_point_bits: self.pixels_per_point_bits,
+            font_gen: self.font_gen,
+            zoom_pct: self.zoom_pct,
+            halign: self.halign,
+        }
+    }
+
+    fn request_hash(self) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        self.hash(&mut hasher);
+        hasher.finish()
+    }
+}
+
+impl CacheKeyData for CacheKeyRef<'_> {
+    fn view(&self) -> CacheKeyRef<'_> {
+        *self
+    }
+}
+
+impl Hash for dyn CacheKeyData + '_ {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.view().hash(state);
+    }
+}
+
+impl PartialEq for dyn CacheKeyData + '_ {
+    fn eq(&self, other: &Self) -> bool {
+        self.view() == other.view()
+    }
+}
+
+impl Eq for dyn CacheKeyData + '_ {}
+
+impl<'a> Borrow<dyn CacheKeyData + 'a> for Arc<CacheKey> {
+    fn borrow(&self) -> &(dyn CacheKeyData + 'a) {
+        self.as_ref()
+    }
 }
 
 struct LayoutCache {
@@ -668,10 +652,11 @@ fn estimated_key_allocation_bytes(key: &CacheKey) -> usize {
 }
 
 fn estimated_plan_allocation_bytes(plan: &CachedPlan) -> usize {
-    if plan.lines.capacity() == 0 {
-        return 0;
-    }
-    plan.lines.capacity().saturating_mul(std::mem::size_of::<CachedPlanLine>()).saturating_add(CACHE_ALLOCATOR_OVERHEAD_BYTES)
+    plan.lines
+        .len()
+        .saturating_mul(std::mem::size_of::<CachedPlanLine>())
+        .saturating_add(2 * std::mem::size_of::<usize>())
+        .saturating_add(CACHE_ALLOCATOR_OVERHEAD_BYTES)
 }
 
 impl LayoutCache {
@@ -686,7 +671,7 @@ impl LayoutCache {
         Self { entries, total_bytes: base_bytes, base_bytes, table_capacity_high_water, clock: 0, max_entries, max_bytes }
     }
 
-    fn get(&mut self, key: &CacheKey) -> Option<CachedPlan> {
+    fn get(&mut self, key: &dyn CacheKeyData) -> Option<CachedPlan> {
         self.clock = self.clock.saturating_add(1);
         let last_used = self.clock;
         let plan = self.entries.get_mut(key)?;
@@ -696,6 +681,7 @@ impl LayoutCache {
 
     fn insert(&mut self, key: Arc<CacheKey>, plan: CachedPlan) {
         let mut plan = plan;
+        plan.key_hash = key.view().request_hash();
         plan.accounted_bytes = estimated_key_allocation_bytes(&key).saturating_add(estimated_plan_allocation_bytes(&plan));
         if self.base_bytes.saturating_add(plan.accounted_bytes) > self.max_bytes {
             return;
@@ -785,14 +771,6 @@ impl LayoutCache {
             }
         });
         self.total_bytes = self.total_bytes.saturating_sub(released_bytes).max(self.base_bytes);
-    }
-
-    #[cfg(feature = "thai-benchmark-diagnostics")]
-    fn context_usage(&self, context_id: u64) -> (usize, usize) {
-        self.entries
-            .iter()
-            .filter(|(key, _)| key.context_id == context_id)
-            .fold((0usize, 0usize), |(entries, bytes), (_, plan)| (entries.saturating_add(1), bytes.saturating_add(plan.accounted_bytes)))
     }
 }
 
@@ -969,66 +947,82 @@ fn aggregate_layout_size(lines: &[ThaiLayoutLine]) -> Vec2 {
 
 /// Executes Thai layout for a cell, returning the ready layout or fallback reason.
 pub fn layout_cell(p: &Painter, text: &str, font: &FontId, color: Color32, avail_width: f32, halign: HAlign, zoom: f32) -> ThaiLayoutResult {
-    let scalar_count = text.chars().take(MAX_THAI_SCALARS.saturating_add(1)).count();
-    if scalar_count > MAX_THAI_SCALARS {
-        #[cfg(feature = "thai-benchmark-diagnostics")]
-        record_benchmark_fallback(p.ctx(), FallbackReason::TextTooLong(scalar_count));
-        return ThaiLayoutResult::LegacyFallback(FallbackReason::TextTooLong(scalar_count));
-    }
     if !avail_width.is_finite() || avail_width < 1.0 || !zoom.is_finite() || zoom <= 0.0 {
-        #[cfg(feature = "thai-benchmark-diagnostics")]
-        record_benchmark_fallback(p.ctx(), FallbackReason::InvalidWidth);
         return ThaiLayoutResult::LegacyFallback(FallbackReason::InvalidWidth);
     }
-
-    let identity = context_cache_identity(p.ctx());
-    let cache_key = Arc::new(CacheKey {
-        text: text.to_string(),
-        family_name: match &font.family {
-            egui::FontFamily::Proportional => "Proportional".to_string(),
-            egui::FontFamily::Monospace => "Monospace".to_string(),
-            egui::FontFamily::Name(n) => n.to_string(),
-        },
-        context_id: identity.context_id,
-        font_size_bits: font.size.to_bits(),
-        avail_width_bits: avail_width.to_bits(),
-        pixels_per_point_bits: p.ctx().pixels_per_point().to_bits(),
-        font_gen: identity.font_generation,
-        zoom_pct: (zoom * 100.0).clamp(0.0, 65535.0) as u16,
-        halign: match halign {
-            HAlign::Center => 1,
-            HAlign::Right => 2,
-            _ => 0,
-        },
+    // Bound lookup hashing even for hostile input. Valid cached text was scalar-checked
+    // on its first miss, so warm hits need no scalar scan or owned key allocation.
+    if text.len() > MAX_THAI_SCALARS.saturating_mul(4) {
+        return ThaiLayoutResult::LegacyFallback(FallbackReason::TextTooLong(MAX_THAI_SCALARS + 1));
+    }
+    let (budget_id, pass_nr) = frame_budget_key(p.ctx());
+    let pixels_per_point_bits = p.ctx().pixels_per_point().to_bits();
+    let request = p.ctx().data_mut(|data| {
+        let identity = *data.get_temp_mut_or_insert_with(context_cache_identity_id(), new_context_cache_identity);
+        let key = CacheKeyRef {
+            text,
+            family_name: match &font.family {
+                egui::FontFamily::Proportional => "Proportional",
+                egui::FontFamily::Monospace => "Monospace",
+                egui::FontFamily::Name(name) => name.as_ref(),
+            },
+            context_id: identity.context_id,
+            font_size_bits: font.size.to_bits(),
+            avail_width_bits: avail_width.to_bits(),
+            pixels_per_point_bits,
+            font_gen: identity.font_generation,
+            zoom_pct: (zoom * 100.0).clamp(0.0, 65535.0) as u16,
+            halign: match halign {
+                HAlign::Center => 1,
+                HAlign::Right => 2,
+                _ => 0,
+            },
+        };
+        // Lock order is Context data -> cache, never the reverse. Both locks are
+        // released before any egui font measurement or galley construction.
+        let cached_plan = CACHE.lock().ok().and_then(|mut guard| guard.get_or_insert_with(LayoutCache::new).get(&key));
+        if cached_plan.is_none() {
+            let count = text.chars().take(MAX_THAI_SCALARS + 1).count();
+            if count > MAX_THAI_SCALARS {
+                return Err(FallbackReason::TextTooLong(count));
+            }
+        }
+        let state = data.get_temp_mut_or_insert_with(budget_id, || FrameBudgetState::new(pass_nr));
+        if state.pass_nr != pass_nr {
+            state.start_pass(pass_nr);
+        }
+        let key_hash = cached_plan.as_ref().map_or_else(|| key.request_hash(), |plan| plan.key_hash);
+        state.record_request(key_hash, cached_plan.is_some());
+        if let Some(plan) = cached_plan {
+            Ok(CacheRequest::Cached(plan))
+        } else if state.exhausted || state.suspend_misses {
+            state.exhausted = true;
+            Ok(CacheRequest::Deferred)
+        } else {
+            Ok(CacheRequest::Measure(Arc::new(key.into_owned())))
+        }
     });
-
-    // Clone the plan while holding the cache lock, then release it before asking egui for font
-    // metrics. The context data lock used above is also never nested with this lock.
-    let cached_plan = CACHE.lock().ok().and_then(|mut cache_guard| cache_guard.get_or_insert_with(LayoutCache::new).get(cache_key.as_ref()));
-    record_layout_request(p.ctx(), cache_key.as_ref(), cached_plan.is_some());
-    if let Some(plan) = cached_plan {
-        if let Some(reason) = plan.fallback_reason {
-            #[cfg(feature = "thai-benchmark-diagnostics")]
-            record_benchmark_fallback(p.ctx(), reason);
-            return ThaiLayoutResult::LegacyFallback(reason);
+    let request = match request {
+        Ok(request) => request,
+        Err(reason) => return ThaiLayoutResult::LegacyFallback(reason),
+    };
+    let cache_key = match request {
+        CacheRequest::Deferred => return ThaiLayoutResult::LegacyFallback(FallbackReason::FrameBudgetExhausted),
+        CacheRequest::Measure(key) => key,
+        CacheRequest::Cached(plan) => {
+            if let Some(reason) = plan.fallback_reason {
+                return ThaiLayoutResult::LegacyFallback(reason);
+            }
+            let mut lines = Vec::with_capacity(plan.lines.len());
+            for line in plan.lines.iter() {
+                let paint_text = text.get(line.range.paint_range.clone()).unwrap_or("");
+                let galley = p.layout_no_wrap(paint_text.to_string(), font.clone(), color);
+                lines.push(ThaiLayoutLine { range: line.range.clone(), galley });
+            }
+            let size = aggregate_layout_size(&lines);
+            return ThaiLayoutResult::Ready(ThaiCellLayout { lines, size });
         }
-        let mut lines = Vec::with_capacity(plan.lines.len());
-        for line in &plan.lines {
-            let paint_text = text.get(line.range.paint_range.clone()).unwrap_or("");
-            let galley = p.layout_no_wrap(paint_text.to_string(), font.clone(), color);
-            lines.push(ThaiLayoutLine { range: line.range.clone(), galley });
-        }
-        let size = aggregate_layout_size(&lines);
-        return ThaiLayoutResult::Ready(ThaiCellLayout { lines, size });
-    }
-
-    // Once a candidate has failed its prospective reservation, later misses in this pass cannot
-    // advance. Skip their segmentation work; retained cache hits above remain usable.
-    if frame_budget_is_exhausted(p.ctx()) {
-        #[cfg(feature = "thai-benchmark-diagnostics")]
-        record_benchmark_fallback(p.ctx(), FallbackReason::FrameBudgetExhausted);
-        return ThaiLayoutResult::LegacyFallback(FallbackReason::FrameBudgetExhausted);
-    }
+    };
 
     // Cache miss: run layout with measurement
     let ranges_res = select_line_ranges_with(
@@ -1048,14 +1042,10 @@ pub fn layout_cell(p: &Painter, text: &str, font: &FontId, color: Color32, avail
         Ok(r) => r,
         Err(FallbackReason::FrameBudgetExhausted) => {
             mark_frame_budget_exhausted(p.ctx());
-            #[cfg(feature = "thai-benchmark-diagnostics")]
-            record_benchmark_fallback(p.ctx(), FallbackReason::FrameBudgetExhausted);
             return ThaiLayoutResult::LegacyFallback(FallbackReason::FrameBudgetExhausted);
         }
         Err(reason) => {
-            #[cfg(feature = "thai-benchmark-diagnostics")]
-            record_benchmark_fallback(p.ctx(), reason);
-            let plan = CachedPlan { lines: Vec::new(), fallback_reason: Some(reason), accounted_bytes: 0, last_used: 0 };
+            let plan = CachedPlan { lines: Arc::from([]), key_hash: 0, fallback_reason: Some(reason), accounted_bytes: 0, last_used: 0 };
             if let Ok(mut cache_guard) = CACHE.lock() {
                 cache_guard.get_or_insert_with(LayoutCache::new).insert(cache_key, plan);
             }
@@ -1073,7 +1063,7 @@ pub fn layout_cell(p: &Painter, text: &str, font: &FontId, color: Color32, avail
     }
 
     let total_size = aggregate_layout_size(&lines);
-    let plan = CachedPlan { lines: plan_lines, fallback_reason: None, accounted_bytes: 0, last_used: 0 };
+    let plan = CachedPlan { lines: plan_lines.into(), key_hash: 0, fallback_reason: None, accounted_bytes: 0, last_used: 0 };
 
     if let Ok(mut cache_guard) = CACHE.lock() {
         let cache = cache_guard.get_or_insert_with(LayoutCache::new);
@@ -1726,6 +1716,80 @@ mod tests {
     }
 
     #[test]
+    fn stopped_overflow_skips_measurements_on_external_repaints_until_keys_change() {
+        let _lock = CACHE_TEST_LOCK.lock().expect("cache test lock");
+        set_test_cache_limits(2, 32 * 1024);
+        let ctx = egui::Context::default();
+        install_cache_test_fonts(&ctx, false);
+        set_frame_budget_limits(&ctx, FrameBudgetLimits { max_measurements: 1, max_measured_bytes: 8 * 1024 });
+        let widths: Vec<f32> = (40..45).map(|width| width as f32).collect();
+        let mut stopped = false;
+        for _ in 0..MAX_RETRY_PASSES {
+            let (_, _, repaint, _) = layout_test_pass(&ctx, "ไทย", &widths);
+            if !repaint {
+                stopped = true;
+                break;
+            }
+        }
+        assert!(stopped);
+        let mut stable_renderers = None;
+        for _ in 0..20 {
+            let (ready, usage, repaint, prior_requests) = layout_test_pass(&ctx, "ไทย", &widths);
+            assert_eq!(usage, FrameBudgetUsage::default(), "an external repaint must not remeasure a stopped workload");
+            assert!(!repaint);
+            assert_eq!(prior_requests, 0);
+            if let Some(previous) = &stable_renderers {
+                assert_eq!(&ready, previous, "cached and fallback cells must remain stable");
+            } else {
+                stable_renderers = Some(ready);
+            }
+        }
+        let changed_widths: Vec<f32> = widths.iter().map(|w| w + 10.0).collect();
+        let (_, deferred_usage, restart, _) = layout_test_pass(&ctx, "ไทย", &changed_widths);
+        assert!(restart, "changed keys restart evaluation after the complete pass is known");
+        assert_eq!(deferred_usage, FrameBudgetUsage::default());
+        let (_, restarted_usage, _, _) = layout_test_pass(&ctx, "ไทย", &changed_widths);
+        assert!(restarted_usage.measurements > 0);
+        if let Ok(mut cache) = CACHE.lock() {
+            *cache = None;
+        }
+    }
+
+    #[test]
+    fn borrowed_cache_lookup_preserves_identity_and_shares_plan_lines() {
+        let mut cache = LayoutCache::new();
+        let key = Arc::new(retry_test_key("ไทย"));
+        let lines: Arc<[CachedPlanLine]> =
+            Arc::from([CachedPlanLine { range: TextLineRange { source_range: 0..9, paint_range: 0..9, break_kind: None } }]);
+        cache
+            .insert(Arc::clone(&key), CachedPlan { lines: Arc::clone(&lines), key_hash: 0, fallback_reason: None, accounted_bytes: 0, last_used: 0 });
+        let mut owned_hasher = DefaultHasher::new();
+        key.hash(&mut owned_hasher);
+        assert_eq!(owned_hasher.finish(), key.view().request_hash(), "borrowed and owned lookup hashes must agree");
+        for _ in 0..3 {
+            let hit = cache.get(&key.view()).expect("borrowed hit");
+            assert!(Arc::ptr_eq(&hit.lines, &lines), "hits must share the retained lines allocation");
+            assert_eq!(hit.key_hash, key.view().request_hash());
+        }
+        let mutations: [fn(&mut CacheKey); 9] = [
+            |k| k.text.push('!'),
+            |k| k.family_name.push('!'),
+            |k| k.context_id += 1,
+            |k| k.font_size_bits = 16.0f32.to_bits(),
+            |k| k.avail_width_bits = 81.0f32.to_bits(),
+            |k| k.pixels_per_point_bits = 2.0f32.to_bits(),
+            |k| k.font_gen += 1,
+            |k| k.zoom_pct += 1,
+            |k| k.halign += 1,
+        ];
+        for mutate in mutations {
+            let mut different = key.as_ref().clone();
+            mutate(&mut different);
+            assert!(cache.get(&different.view()).is_none(), "every layout identity component must distinguish plans");
+        }
+    }
+
+    #[test]
     fn cache_overflow_working_set_stops_retry_with_bounded_state() {
         let _lock = CACHE_TEST_LOCK.lock().expect("cache test lock");
         set_test_cache_limits(2, 32 * 1024);
@@ -1940,7 +2004,7 @@ mod tests {
             halign: 0,
         });
         let lines = vec![CachedPlanLine { range: TextLineRange { source_range: 0..0, paint_range: 0..0, break_kind: None } }; 16];
-        let plan = CachedPlan { lines, fallback_reason: None, accounted_bytes: 0, last_used: 0 };
+        let plan = CachedPlan { lines: lines.into(), key_hash: 0, fallback_reason: None, accounted_bytes: 0, last_used: 0 };
         let expected_entry_bytes = estimated_key_allocation_bytes(&key).saturating_add(estimated_plan_allocation_bytes(&plan));
         cache.insert(Arc::clone(&key), plan);
         let cached = cache.entries.get(key.as_ref()).expect("the ordinary entry should fit");
@@ -1958,7 +2022,7 @@ mod tests {
             zoom_pct: 100,
             halign: 0,
         });
-        let oversized_plan = CachedPlan { lines: Vec::new(), fallback_reason: None, accounted_bytes: 0, last_used: 0 };
+        let oversized_plan = CachedPlan { lines: Arc::from([]), key_hash: 0, fallback_reason: None, accounted_bytes: 0, last_used: 0 };
         cache.insert(Arc::clone(&oversized_key), oversized_plan);
         assert!(!cache.entries.contains_key(oversized_key.as_ref()), "an oversized entry must never be admitted");
         assert!(cache.total_bytes <= MAX_CACHE_BYTES);
@@ -1990,7 +2054,7 @@ mod tests {
         let key0 = key_for(0);
         let key1 = key_for(1);
         let key2 = key_for(2);
-        let empty_plan = || CachedPlan { lines: Vec::new(), fallback_reason: None, accounted_bytes: 0, last_used: 0 };
+        let empty_plan = || CachedPlan { lines: Arc::from([]), key_hash: 0, fallback_reason: None, accounted_bytes: 0, last_used: 0 };
         cache.insert(Arc::clone(&key0), empty_plan());
         cache.insert(Arc::clone(&key1), empty_plan());
         assert_eq!(cache.entries.len(), 2, "two realistic entries should fit under the byte cap");
@@ -2026,7 +2090,7 @@ mod tests {
                 zoom_pct: 100,
                 halign: 0,
             });
-            cache.insert(key, CachedPlan { lines: Vec::new(), fallback_reason: None, accounted_bytes: 0, last_used: 0 });
+            cache.insert(key, CachedPlan { lines: Arc::from([]), key_hash: 0, fallback_reason: None, accounted_bytes: 0, last_used: 0 });
 
             high_water_capacity = high_water_capacity.max(cache.entries.capacity());
             saw_growth |= high_water_capacity > initial_capacity;
@@ -2083,7 +2147,7 @@ mod tests {
         let least_recent = large_key_for(0);
         let touched = large_key_for(1);
         let newest = large_key_for(2);
-        let empty_plan = || CachedPlan { lines: Vec::new(), fallback_reason: None, accounted_bytes: 0, last_used: 0 };
+        let empty_plan = || CachedPlan { lines: Arc::from([]), key_hash: 0, fallback_reason: None, accounted_bytes: 0, last_used: 0 };
         cache.insert(Arc::clone(&least_recent), empty_plan());
         cache.insert(Arc::clone(&touched), empty_plan());
         assert_eq!(cache.entries.len(), 2, "two large entries should fit before byte-cap pressure");
@@ -2133,7 +2197,7 @@ mod tests {
                 zoom_pct: 100,
                 halign: 0,
             });
-            cache.insert(Arc::clone(&key), CachedPlan { lines: Vec::new(), fallback_reason: None, accounted_bytes: 0, last_used: 0 });
+            cache.insert(Arc::clone(&key), CachedPlan { lines: Arc::from([]), key_hash: 0, fallback_reason: None, accounted_bytes: 0, last_used: 0 });
         }
         assert_eq!(cache.entries.len(), MAX_CACHE_ENTRIES);
         assert!(!cache.entries.keys().any(|key| key.text == "entry-limit-0"));

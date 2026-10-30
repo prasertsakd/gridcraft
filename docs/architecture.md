@@ -1,6 +1,6 @@
 # Architecture
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-30 · **Change:** minor (Thai layout integrated with extracted grid cell/pane functions; macro architecture retained) · **Target:** Microsoft Excel (Microsoft 365)
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-30 · **Change:** minor (Thai retry stabilization, shared cache plans and unique save temporary files) · **Target:** Microsoft Excel (Microsoft 365)
 
 How GridCraft is built today. Rules for contributors are in [`AGENTS.md`](../AGENTS.md).
 
@@ -12,6 +12,8 @@ including tests, 2026-10-10.
 
 | Layer | Crate | Lines | Job |
 |---|---|---|---|
+| 2026-10-30 | minor | Stabilize Thai cache overflow across external repaints, borrow hit keys and share line plans; isolate snapshot diagnostics |
+| 2026-10-30 | minor | Unique save temporary files, preserved stale paths and isolated portable filesystem regressions |
 | L0 | `core` | ~1.3k | Cell and range addresses (A1, R1C1, sheet-qualified; 1,048,576 × 16,384), `Value`, `CellError`, Excel coercion, 1900/1904 date serials, typed-input parsing |
 | L0 | `numfmt` | ~2.1k | Excel number-format codes (sections, conditions, colours, dates, elapsed time, fractions, scientific, fill), General, `TEXT()`; en-US only |
 | L1 | `formula` | ~1.7k | Tokenizer, parser, AST, printer (A1 and R1C1), reference adjustment for copy, fill and structural edits |
@@ -80,7 +82,7 @@ drawing its own:
   scrolls; one line is Excel's 30 px unless the font's rows need more (`formula_bar::one_line`;
   the Windows UI font's row is 17.28 px), so every counted line fits whatever the font;
   `formula_bar::BarLayout` records where its parts went each frame, for tests.
-- **Thai cell line wrapping** (`thai_layout.rs`): ICU4X LSTM `LineSegmenter` supplies break opportunities for committed worksheet cells with Wrap Text enabled. The renderer measures candidate substrings with egui's active font, clips oversized first segments, preserves exact UTF-8 byte ranges without changing workbook text, and falls back when cell or frame work budgets are exhausted. Its global plan LRU is capped at 1,024 entries and an 8 MiB estimate of retained allocations, including HashMap table capacity, keys/strings and line vectors; this estimate is not process RSS. Keys include Context identity, font family/size/generation, width, zoom, alignment and pixels-per-point. Installing fonts invalidates only that Context's plans, and final galleys reuse egui's per-Context layout cache. T1 row heights are explicit, so Thai AutoFit and in-cell editor wrapping remain separate work.
+- **Thai cell line wrapping** (`thai_layout.rs`): ICU4X LSTM `LineSegmenter` supplies break opportunities for committed worksheet cells with Wrap Text enabled. The renderer measures candidate substrings with egui's active font, clips oversized first segments, preserves exact UTF-8 byte ranges without changing workbook text, and falls back when cell or frame work budgets are exhausted. Its global plan LRU is capped at 1,024 entries and an 8 MiB estimate of retained allocations, including HashMap table capacity, keys/strings and shared line slices; this estimate is not process RSS. Keys include Context identity, font family/size/generation, width, zoom, alignment and pixels-per-point. Installing fonts invalidates only that Context's plans, and final galleys reuse egui's per-Context layout cache. Cache hits use borrowed keys and share line plans. After bounded no-progress retries, an unchanged workload uses cached plans or legacy fallback without remeasuring misses; a changed complete pass workload restarts evaluation on the following pass. T1 row heights are explicit, so Thai AutoFit and in-cell editor wrapping remain separate work.
 
 
 ## Engine building blocks for multi-command actions
@@ -155,6 +157,12 @@ rpm, tarball), FreeBSD, and web (WASM; WebGPU or WebGL2). Release workflows in
 - No string catalog or text shaping (see [localization-parity.md](localization-parity.md)).
 - XLSX reader builds the whole workbook in memory; no streaming (#175).
 - Unmodelled XLSX parts are not carried through a save.
+
+Workbook saves exclusively create a unique sibling temporary file before writing and replacing
+the destination. Stale temporary files and pre-existing symlinks remain untouched and cannot block
+later saves. Automatic cleanup applies only to the temporary file this save owns; native regular-file
+and Unix symlink collision regressions cover that ownership boundary. Filesystem tests use isolated
+temporary directories with automatic cleanup on both success and assertion failure.
 
 ## Revision history
 
