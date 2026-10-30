@@ -195,13 +195,10 @@ impl PdfFont {
         Arc::ptr_eq(&self.identity, &other.identity)
     }
 
-    /// Conservative line extents from the font's full glyph bounds, in points.
+    /// Line extents from the font's ascent and descent metrics, in points.
     pub fn vertical_extents(&self, size: f32) -> (f32, f32) {
         let scale = size / f32::from(self.units_per_em.max(1));
-        (
-            (f32::from(self.bbox[3]).max(f32::from(self.ascent)) * scale).max(0.0),
-            ((-f32::from(self.bbox[1])).max(-f32::from(self.descent)) * scale).max(0.0),
-        )
+        ((f32::from(self.ascent) * scale).max(0.0), (-f32::from(self.descent) * scale).max(0.0))
     }
 
     /// Shapes text using the OpenType tables in this face. Cluster values map back to UTF-8 bytes.

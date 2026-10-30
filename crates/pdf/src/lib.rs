@@ -928,6 +928,7 @@ fn font_key(font: &PdfFont) -> (String, String, Arc<[u8]>) {
 }
 
 /// OS/2 fsType bit 8: the face may be embedded only as a whole.
+#[cfg(not(target_arch = "wasm32"))]
 const FS_TYPE_NO_SUBSETTING: u16 = 0x0100;
 
 /// A face's FontFile2 and descriptor, written once per document and shared by every page's
@@ -971,20 +972,29 @@ fn subset_tag(name: &str, glyphs: &BTreeSet<u16>) -> String {
 }
 
 /// The face reduced to `glyphs` plus .notdef, with the glyph id mapping. `None` when the face
-/// forbids subsetting or the subsetter rejects it; the caller then embeds the whole face.
+/// forbids subsetting, the subsetter rejects it, or the target is WASM; the caller embeds the whole face.
 fn subset_face(font: &PdfFont, glyphs: &BTreeSet<u16>) -> Option<(Vec<u8>, GlyphRemapper)> {
-    if font.fs_type & FS_TYPE_NO_SUBSETTING != 0 {
-        return None;
+    #[cfg(target_arch = "wasm32")]
+    {
+        // WASM targets use panic=abort, so untrusted font tables must not reach the subsetter.
+        let _ = (font, glyphs);
+        None
     }
-    let mut remapper = GlyphRemapper::new();
-    for glyph in glyphs {
-        remapper.remap(*glyph);
-    }
-    // The subsetter parses tables ttf-parser never validated; a face it trips over is embedded
-    // whole rather than failing the export.
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| subsetter::subset(&font.bytes, font.face_index, &remapper))) {
-        Ok(Ok(bytes)) => Some((bytes, remapper)),
-        _ => None,
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        if font.fs_type & FS_TYPE_NO_SUBSETTING != 0 {
+            return None;
+        }
+        let mut remapper = GlyphRemapper::new();
+        for glyph in glyphs {
+            remapper.remap(*glyph);
+        }
+        // The subsetter parses tables ttf-parser never validated; a face it trips over is embedded
+        // whole rather than failing the export.
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| subsetter::subset(&font.bytes, font.face_index, &remapper))) {
+            Ok(Ok(bytes)) => Some((bytes, remapper)),
+            _ => None,
+        }
     }
 }
 

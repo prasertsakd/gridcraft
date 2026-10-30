@@ -48,7 +48,7 @@ including tests, 2026-10-10.
    for the visible window only; charts render through `crates/chart` primitives.
 5. **Files**: `engine/io.rs` sniffs content (XLSX, XLSB, ODS) before trusting the extension and
    dispatches to `crates/xlsx`; imports that lose data return warnings shown to the user.
-6. **PDF and Print**: `engine/cmd/print.rs` sends workbook text to the L0 `pdf` crate, which shapes
+6. **PDF and Print**: `engine/cmd/print.rs` sends workbook text to the L2 `pdf` crate, which shapes
    Thai with HarfRust and embeds permitted TrueType faces. Each face is embedded once per
    document, subset (with the `subsetter` crate) to the glyphs the document draws and named with a
    tag derived from that glyph set, so the same input gives the same bytes; a PDF of one Thai cell is
