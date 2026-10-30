@@ -110,6 +110,10 @@ struct FrameBudgetState {
     retry_progress: RetryProgress,
     finish_baseline: Option<RetryProgress>,
     repaint_retry: bool,
+    #[cfg(feature = "thai-benchmark-diagnostics")]
+    transient_fallbacks: usize,
+    #[cfg(feature = "thai-benchmark-diagnostics")]
+    permanent_fallbacks: usize,
 }
 
 impl FrameBudgetState {
@@ -126,6 +130,10 @@ impl FrameBudgetState {
             retry_progress: RetryProgress::default(),
             finish_baseline: None,
             repaint_retry: false,
+            #[cfg(feature = "thai-benchmark-diagnostics")]
+            transient_fallbacks: 0,
+            #[cfg(feature = "thai-benchmark-diagnostics")]
+            permanent_fallbacks: 0,
         }
     }
 
@@ -139,6 +147,11 @@ impl FrameBudgetState {
         self.suspend_misses = self.retry_progress.stopped;
         self.finish_baseline = None;
         self.repaint_retry = false;
+        #[cfg(feature = "thai-benchmark-diagnostics")]
+        {
+            self.transient_fallbacks = 0;
+            self.permanent_fallbacks = 0;
+        }
     }
 
     fn record_request(&mut self, key_hash: u64, cache_hit: bool) {
@@ -288,6 +301,96 @@ pub fn frame_budget_usage(ctx: &egui::Context) -> FrameBudgetUsage {
             measured_bytes: state.usage.measured_bytes,
         })
     })
+}
+
+#[cfg(feature = "thai-benchmark-diagnostics")]
+fn context_cache_identity(ctx: &egui::Context) -> ContextCacheIdentity {
+    ctx.data_mut(|data| *data.get_temp_mut_or_insert_with(context_cache_identity_id(), new_context_cache_identity))
+}
+
+/// Counters from actual Thai adapter requests in one renderer pass.
+/// Available only in an opt-in benchmark build.
+#[cfg(feature = "thai-benchmark-diagnostics")]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub struct BenchmarkPassUsage {
+    pub requests: usize,
+    pub cache_hits: usize,
+    pub cache_misses: usize,
+    pub segmentations: usize,
+    pub measurements: usize,
+    pub measured_bytes: usize,
+    pub transient_fallbacks: usize,
+    pub permanent_fallbacks: usize,
+    pub exhausted: bool,
+    pub repaint_retry: bool,
+    pub retry_passes: usize,
+    pub no_progress_passes: usize,
+}
+
+/// Benchmark-only snapshot of measured pass counters and cache accounting.
+#[cfg(feature = "thai-benchmark-diagnostics")]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub struct BenchmarkDiagnostics {
+    pub pass: BenchmarkPassUsage,
+    pub context_cache_entries: usize,
+    pub context_cache_accounted_bytes: usize,
+    pub global_cache_entries: usize,
+    pub global_cache_accounted_bytes: usize,
+}
+
+/// Reads benchmark-only counters after the production grid renderer has run.
+#[cfg(feature = "thai-benchmark-diagnostics")]
+pub fn benchmark_diagnostics(ctx: &egui::Context) -> BenchmarkDiagnostics {
+    let (id, _) = frame_budget_key(ctx);
+    let pass = ctx.data(|data| {
+        data.get_temp::<FrameBudgetState>(id).map_or_else(BenchmarkPassUsage::default, |state| BenchmarkPassUsage {
+            requests: state.workload_items,
+            cache_hits: state.cache_hits,
+            cache_misses: state.workload_items.saturating_sub(state.cache_hits),
+            segmentations: state.usage.segmentations,
+            measurements: state.usage.measurements,
+            measured_bytes: state.usage.measured_bytes,
+            transient_fallbacks: state.transient_fallbacks,
+            permanent_fallbacks: state.permanent_fallbacks,
+            exhausted: state.exhausted,
+            repaint_retry: state.repaint_retry,
+            retry_passes: state.retry_progress.passes,
+            no_progress_passes: state.retry_progress.no_progress_passes,
+        })
+    });
+    let identity = context_cache_identity(ctx);
+    let (context_cache_entries, context_cache_accounted_bytes) =
+        CACHE.lock().map_or((0, 0), |guard| guard.as_ref().map_or((0, 0), |cache| cache.context_usage(identity.context_id)));
+    let global = cache_usage();
+    BenchmarkDiagnostics {
+        pass,
+        context_cache_entries,
+        context_cache_accounted_bytes,
+        global_cache_entries: global.entries,
+        global_cache_accounted_bytes: global.payload_bytes,
+    }
+}
+
+/// Clears only plans owned by `ctx`, preserving cache entries from other Contexts.
+#[cfg(feature = "thai-benchmark-diagnostics")]
+pub fn clear_context_cache_for_benchmark(ctx: &egui::Context) {
+    let identity = context_cache_identity(ctx);
+    if let Ok(mut guard) = CACHE.lock()
+        && let Some(cache) = guard.as_mut()
+    {
+        cache.clear_context(identity.context_id);
+    }
+}
+
+#[cfg(feature = "thai-benchmark-diagnostics")]
+fn record_benchmark_fallback(ctx: &egui::Context, reason: FallbackReason) {
+    with_frame_budget(ctx, |state| {
+        if reason == FallbackReason::FrameBudgetExhausted {
+            state.transient_fallbacks = state.transient_fallbacks.saturating_add(1);
+        } else {
+            state.permanent_fallbacks = state.permanent_fallbacks.saturating_add(1);
+        }
+    });
 }
 
 /// Approximate resident memory retained by the bounded Thai line-plan cache.
@@ -772,6 +875,13 @@ impl LayoutCache {
         });
         self.total_bytes = self.total_bytes.saturating_sub(released_bytes).max(self.base_bytes);
     }
+    #[cfg(feature = "thai-benchmark-diagnostics")]
+    fn context_usage(&self, context_id: u64) -> (usize, usize) {
+        self.entries
+            .iter()
+            .filter(|(key, _)| key.context_id == context_id)
+            .fold((0usize, 0usize), |(entries, bytes), (_, plan)| (entries.saturating_add(1), bytes.saturating_add(plan.accounted_bytes)))
+    }
 }
 
 static CACHE: Mutex<Option<LayoutCache>> = Mutex::new(None);
@@ -948,11 +1058,15 @@ fn aggregate_layout_size(lines: &[ThaiLayoutLine]) -> Vec2 {
 /// Executes Thai layout for a cell, returning the ready layout or fallback reason.
 pub fn layout_cell(p: &Painter, text: &str, font: &FontId, color: Color32, avail_width: f32, halign: HAlign, zoom: f32) -> ThaiLayoutResult {
     if !avail_width.is_finite() || avail_width < 1.0 || !zoom.is_finite() || zoom <= 0.0 {
+        #[cfg(feature = "thai-benchmark-diagnostics")]
+        record_benchmark_fallback(p.ctx(), FallbackReason::InvalidWidth);
         return ThaiLayoutResult::LegacyFallback(FallbackReason::InvalidWidth);
     }
     // Bound lookup hashing even for hostile input. Valid cached text was scalar-checked
     // on its first miss, so warm hits need no scalar scan or owned key allocation.
     if text.len() > MAX_THAI_SCALARS.saturating_mul(4) {
+        #[cfg(feature = "thai-benchmark-diagnostics")]
+        record_benchmark_fallback(p.ctx(), FallbackReason::TextTooLong(MAX_THAI_SCALARS + 1));
         return ThaiLayoutResult::LegacyFallback(FallbackReason::TextTooLong(MAX_THAI_SCALARS + 1));
     }
     let (budget_id, pass_nr) = frame_budget_key(p.ctx());
@@ -1004,13 +1118,23 @@ pub fn layout_cell(p: &Painter, text: &str, font: &FontId, color: Color32, avail
     });
     let request = match request {
         Ok(request) => request,
-        Err(reason) => return ThaiLayoutResult::LegacyFallback(reason),
+        Err(reason) => {
+            #[cfg(feature = "thai-benchmark-diagnostics")]
+            record_benchmark_fallback(p.ctx(), reason);
+            return ThaiLayoutResult::LegacyFallback(reason);
+        }
     };
     let cache_key = match request {
-        CacheRequest::Deferred => return ThaiLayoutResult::LegacyFallback(FallbackReason::FrameBudgetExhausted),
+        CacheRequest::Deferred => {
+            #[cfg(feature = "thai-benchmark-diagnostics")]
+            record_benchmark_fallback(p.ctx(), FallbackReason::FrameBudgetExhausted);
+            return ThaiLayoutResult::LegacyFallback(FallbackReason::FrameBudgetExhausted);
+        }
         CacheRequest::Measure(key) => key,
         CacheRequest::Cached(plan) => {
             if let Some(reason) = plan.fallback_reason {
+                #[cfg(feature = "thai-benchmark-diagnostics")]
+                record_benchmark_fallback(p.ctx(), reason);
                 return ThaiLayoutResult::LegacyFallback(reason);
             }
             let mut lines = Vec::with_capacity(plan.lines.len());
@@ -1042,9 +1166,13 @@ pub fn layout_cell(p: &Painter, text: &str, font: &FontId, color: Color32, avail
         Ok(r) => r,
         Err(FallbackReason::FrameBudgetExhausted) => {
             mark_frame_budget_exhausted(p.ctx());
+            #[cfg(feature = "thai-benchmark-diagnostics")]
+            record_benchmark_fallback(p.ctx(), FallbackReason::FrameBudgetExhausted);
             return ThaiLayoutResult::LegacyFallback(FallbackReason::FrameBudgetExhausted);
         }
         Err(reason) => {
+            #[cfg(feature = "thai-benchmark-diagnostics")]
+            record_benchmark_fallback(p.ctx(), reason);
             let plan = CachedPlan { lines: Arc::from([]), key_hash: 0, fallback_reason: Some(reason), accounted_bytes: 0, last_used: 0 };
             if let Ok(mut cache_guard) = CACHE.lock() {
                 cache_guard.get_or_insert_with(LayoutCache::new).insert(cache_key, plan);

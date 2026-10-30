@@ -1,6 +1,6 @@
 # Architecture
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-30 · **Change:** minor (Thai retry stabilization, shared cache plans and unique save temporary files) · **Target:** Microsoft Excel (Microsoft 365)
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-30 · **Change:** minor (separate opt-in Thai verification tools) · **Target:** Microsoft Excel (Microsoft 365)
 
 How GridCraft is built today. Rules for contributors are in [`AGENTS.md`](../AGENTS.md).
 
@@ -85,6 +85,12 @@ drawing its own:
 - **Thai cell line wrapping** (`thai_layout.rs`): ICU4X LSTM `LineSegmenter` supplies break opportunities for committed worksheet cells with Wrap Text enabled. The renderer measures candidate substrings with egui's active font, clips oversized first segments, preserves exact UTF-8 byte ranges without changing workbook text, and falls back when cell or frame work budgets are exhausted. Its global plan LRU is capped at 1,024 entries and an 8 MiB estimate of retained allocations, including HashMap table capacity, keys/strings and shared line slices; this estimate is not process RSS. Keys include Context identity, font family/size/generation, width, zoom, alignment and pixels-per-point. Installing fonts invalidates only that Context's plans, and final galleys reuse egui's per-Context layout cache. Cache hits use borrowed keys and share line plans. After bounded no-progress retries, an unchanged workload uses cached plans or legacy fallback without remeasuring misses; a changed complete pass workload restarts evaluation on the following pass. T1 row heights are explicit, so Thai AutoFit and in-cell editor wrapping remain separate work.
 
 
+Thai verification examples live outside the application flow: `benchmark_thai_renderer` paints a
+500-visible-cell workload and `verify_thai_visuals` renders synthetic font/layout cases. The
+`thai-benchmark-diagnostics` feature enables pass/fallback/cache counters for the benchmark; default
+builds omit those hooks. Timing output is evidence only for its measured source and host, and
+compilation of these tools does not establish a performance or shaping result.
+
 ## Engine building blocks for multi-command actions
 
 Actions made of many commands (macros, a debugger that runs one step per call) use these parts of
@@ -168,6 +174,7 @@ temporary directories with automatic cleanup on both success and assertion failu
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-30 | minor | Extract Thai benchmark/visual examples and optional diagnostic hooks for separate review |
 | 2026-10-30 | minor | Preserve Thai eligibility, geometry and shared pass budgets in upstream extracted cell/pane functions; describe retained table allocation accounting |
 | 2026-10-26 | minor | Thai cell wrapping: font-generation and DPI cache identity, bounded payload accounting, and explicit T1 scope (AutoFit/editor remain separate) |
 | 2026-10-25 | trivial | The hidden names that hold macros are `_gc_macro_<n>_<k>` |

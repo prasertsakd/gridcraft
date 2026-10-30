@@ -39,6 +39,8 @@ pub mod ribbon;
 pub mod selection_glide;
 pub mod tabs;
 pub mod text_box;
+#[doc(hidden)]
+pub mod thai_benchmark;
 pub mod thai_layout;
 pub mod theme;
 #[cfg(not(target_arch = "wasm32"))]

@@ -8,6 +8,9 @@ description = "GridCraft egui frontend (Excel-style UI); swappable — nothing b
 [lints]
 workspace = true
 
+[features]
+thai-benchmark-diagnostics = []
+
 [dependencies]
 # The shared capture slot (`craft_ui::capture`) comes from the one craft-libs revision every
 # craft-libs dependency uses (see the root Cargo.toml).
