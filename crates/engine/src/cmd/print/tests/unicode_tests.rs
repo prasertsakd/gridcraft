@@ -135,7 +135,7 @@ fn narrow_test_ttf(first: u16) -> Vec<u8> {
     out
 }
 
-fn has_actual_text(pdf: &[u8], text: &str) -> bool {
+pub(super) fn has_actual_text(pdf: &[u8], text: &str) -> bool {
     let mut encoded = String::from("/ActualText <FEFF");
     for unit in text.encode_utf16() {
         use std::fmt::Write as _;
