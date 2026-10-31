@@ -1,6 +1,6 @@
 # Architecture
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-30 · **Change:** minor (Thai retry stabilization, shared cache plans and unique save temporary files) · **Target:** Microsoft Excel (Microsoft 365)
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-31 · **Change:** trivial (revision-history table placement) · **Target:** Microsoft Excel (Microsoft 365)
 
 How GridCraft is built today. Rules for contributors are in [`AGENTS.md`](../AGENTS.md).
 
@@ -12,8 +12,6 @@ including tests, 2026-10-10.
 
 | Layer | Crate | Lines | Job |
 |---|---|---|---|
-| 2026-10-30 | minor | Stabilize Thai cache overflow across external repaints, borrow hit keys and share line plans; isolate snapshot diagnostics |
-| 2026-10-30 | minor | Unique save temporary files, preserved stale paths and isolated portable filesystem regressions |
 | L0 | `core` | ~1.3k | Cell and range addresses (A1, R1C1, sheet-qualified; 1,048,576 × 16,384), `Value`, `CellError`, Excel coercion, 1900/1904 date serials, typed-input parsing |
 | L0 | `numfmt` | ~2.1k | Excel number-format codes (sections, conditions, colours, dates, elapsed time, fractions, scientific, fill), General, `TEXT()`; en-US only |
 | L1 | `formula` | ~1.7k | Tokenizer, parser, AST, printer (A1 and R1C1), reference adjustment for copy, fill and structural edits |
@@ -168,6 +166,8 @@ temporary directories with automatic cleanup on both success and assertion failu
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-30 | minor | Stabilize Thai cache overflow across external repaints, borrow hit keys and share line plans; isolate snapshot diagnostics |
+| 2026-10-30 | minor | Unique save temporary files, preserved stale paths and isolated portable filesystem regressions |
 | 2026-10-30 | minor | Preserve Thai eligibility, geometry and shared pass budgets in upstream extracted cell/pane functions; describe retained table allocation accounting |
 | 2026-10-26 | minor | Thai cell wrapping: font-generation and DPI cache identity, bounded payload accounting, and explicit T1 scope (AutoFit/editor remain separate) |
 | 2026-10-25 | trivial | The hidden names that hold macros are `_gc_macro_<n>_<k>` |
